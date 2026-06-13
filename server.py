@@ -1,23 +1,25 @@
-import http.server
-import socketserver
-import os
-import urllib.parse
-from datetime import datetime
-import re
-import math
-import zipfile
-import io
-import uuid
-import tempfile
-import shutil
 import base64
+import http.server
+import math
+import os
+import re
+import shutil
+import socketserver
+import tempfile
+import urllib.parse
+import uuid
+import zipfile
+from datetime import datetime
+from typing import Any
 
 # --- Configuration ---
 PORT = int(os.environ.get("ESSAY_PORT", "8000"))
 ESSAY_DIR = os.environ.get("ESSAY_DIRECTORY", "essays")
 ITEMS_PER_PAGE = int(os.environ.get("ESSAY_ITEMS_PER_PAGE", "10"))
-MAX_UPLOAD_SIZE = int(os.environ.get("ESSAY_MAX_UPLOAD_SIZE_MIB", "50")) * 1024 * 1024  # 50 MB Limit to prevent DoS
-CSRF_TOKEN = str(uuid.uuid4())      # Unique token for this server session
+MAX_UPLOAD_SIZE = (
+    int(os.environ.get("ESSAY_MAX_UPLOAD_SIZE_MIB", "50")) * 1024 * 1024
+)  # 50 MB Limit to prevent DoS
+CSRF_TOKEN = str(uuid.uuid4())  # Unique token for this server session
 
 # --- Security Credentials (Default: admin / admin) ---
 AUTH_USERNAME = os.environ.get("ESSAY_USER", "admin")
@@ -33,7 +35,7 @@ DDC_CLASSES = [
     "600 Technology",
     "700 Arts and recreation",
     "800 Literature",
-    "900 History and geography"
+    "900 History and geography",
 ]
 
 # --- CSS Styling (Dark Mode + Analytics + Edit Form) ---
@@ -180,56 +182,60 @@ CSS = """
 </style>
 """
 
-def estimate_reading_time(text):
+
+def estimate_reading_time(text: str):
     """Calculates word count and estimated reading time (minutes)."""
     word_count = len(text.split())
-    minutes = math.ceil(word_count / 200) # Avg reading speed 200 wpm
+    minutes = math.ceil(word_count / 200)  # Avg reading speed 200 wpm
     return word_count, minutes
 
-def render_markdown(text):
+
+def render_markdown(text: str):
     """Lightweight Markdown parser (Bold, Italic, Headers, Quotes, Paragraphs)."""
-    if not text: return ""
-    
+    if not text:
+        return ""
+
     # 1. Escape HTML (Basic security)
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-    
-    lines = text.split('\n')
-    new_lines = []
-    
+
+    lines = text.split("\n")
+    new_lines: list[str] = []
+
     for line in lines:
         stripped = line.strip()
-        
+
         # Headers
-        if stripped.startswith('### '):
+        if stripped.startswith("### "):
             new_lines.append(f"<h3>{stripped[4:]}</h3>")
-        elif stripped.startswith('## '):
+        elif stripped.startswith("## "):
             new_lines.append(f"<h2>{stripped[3:]}</h2>")
-        elif stripped.startswith('# '):
+        elif stripped.startswith("# "):
             new_lines.append(f"<h1>{stripped[2:]}</h1>")
         # Blockquotes
-        elif stripped.startswith('> '):
+        elif stripped.startswith("> "):
             new_lines.append(f"<blockquote>{stripped[2:]}</blockquote>")
         else:
             # Inline formatting (Bold & Italic)
             # Bold **text**
-            line = re.sub(r'\*\*(.*?)\*\*', r'<strong>\1</strong>', line)
+            line = re.sub(r"\*\*(.*?)\*\*", r"<strong>\1</strong>", line)
             # Italic *text*
-            line = re.sub(r'\*(.*?)\*', r'<em>\1</em>', line)
+            line = re.sub(r"\*(.*?)\*", r"<em>\1</em>", line)
             new_lines.append(line)
 
     # Rejoin to handle paragraph splitting (Double newline = new paragraph)
     # We join everything back, then split by double newlines to find paragraphs
     # Note: Headers/Quotes already have tags, so we need to be careful not to wrap them in <p> if not needed.
     # For a lightweight parser, we'll keep it simple: Double \n is a separator.
-    
+
     processed_body = "\n".join(new_lines)
     blocks = processed_body.split("\n\n")
-    
-    final_html_blocks = []
+
+    final_html_blocks: list[str] = []
     for block in blocks:
         block = block.strip()
-        if not block: continue
-        
+        if not block:
+            continue
+
         # If the block is already an HTML tag (header/quote), don't wrap in <p>
         if block.startswith("<h") or block.startswith("<blockquote"):
             final_html_blocks.append(block)
@@ -237,28 +243,31 @@ def render_markdown(text):
             # Convert single newlines within a paragraph to <br> for line breaks
             content = block.replace("\n", "<br>")
             final_html_blocks.append(f"<p>{content}</p>")
-            
+
     return "\n".join(final_html_blocks)
 
-def parse_metadata(comments_text):
+
+def parse_metadata(comments_text: str):
     """Parses the section after '----' for structured fields."""
-    meta = {
+    meta: dict[str, Any] = {
         "grade": None,
         "grader": "Unknown",
         "grader_note": "",
         "reflection": "",
         "tag": None,
-        "raw_comments": comments_text
+        "raw_comments": comments_text,
     }
-    
+
     if not comments_text:
         return meta
 
     # 1. Extract Grade (Regex)
     grade_match = re.search(r"Grade:\s*([\d\.]+)/10", comments_text, re.IGNORECASE)
     if grade_match:
-        try: meta["grade"] = float(grade_match.group(1))
-        except: pass
+        try:
+            meta["grade"] = float(grade_match.group(1))
+        except ValueError:
+            pass
 
     # 2. Extract Tag (Regex)
     tag_match = re.search(r"Class:\s*(.+)", comments_text, re.IGNORECASE)
@@ -272,17 +281,17 @@ def parse_metadata(comments_text):
 
     # 4. Extract Blocks (Grader's Note & Self-Reflection)
     # We scan line by line to handle multi-line content
-    lines = comments_text.split('\n')
-    current_section = None
+    lines = comments_text.split("\n")
+    current_section: str | None = None
     buffer = []
 
-    def save_buffer(section_name):
+    def save_buffer(section_name: str | None):
         if section_name and buffer:
             meta[section_name] = "\n".join(buffer).strip()
 
     for line in lines:
         clean_line = line.strip()
-        
+
         if clean_line.startswith("Grader's Note:"):
             save_buffer(current_section)
             current_section = "grader_note"
@@ -291,47 +300,52 @@ def parse_metadata(comments_text):
             save_buffer(current_section)
             current_section = "reflection"
             buffer = [clean_line.replace("Self-Reflection:", "").strip()]
-        elif clean_line.startswith("Grade:") or clean_line.startswith("Grader:") or clean_line.startswith("Class:"):
+        elif (
+            clean_line.startswith("Grade:")
+            or clean_line.startswith("Grader:")
+            or clean_line.startswith("Class:")
+        ):
             # These keys reset the block reading if we were in one
             save_buffer(current_section)
             current_section = None
             buffer = []
         else:
             if current_section:
-                buffer.append(line) # Keep indentation if any
-    
+                buffer.append(line)  # Keep indentation if any
+
     save_buffer(current_section)
-    
+
     # Render markdown for the notes
     if meta["grader_note"]:
         meta["grader_note_html"] = render_markdown(meta["grader_note"])
     if meta["reflection"]:
         meta["reflection_html"] = render_markdown(meta["reflection"])
-        
+
     return meta
+
 
 def load_essays():
     """Scans the essay folder and returns a list of dictionaries."""
-    data = []
-    
+    data: list[dict[str, Any]] = []
+
     if not os.path.exists(ESSAY_DIR):
         os.makedirs(ESSAY_DIR)
-        return []
+        return data
 
     for filename in os.listdir(ESSAY_DIR):
         if filename.endswith(".txt"):
             filepath = os.path.join(ESSAY_DIR, filename)
             try:
-                with open(filepath, 'r', encoding='utf-8') as f:
+                with open(filepath, "r", encoding="utf-8") as f:
                     lines = [line.strip() for line in f.readlines()]
-                
+
                 if len(lines) >= 3:
                     title = lines[0]
                     # Date is expected to be the last line
                     date_str = lines[-1]
-                    
-                    full_text = "\n".join(lines[1:-1]) # Exclude Title and Date line
-                    
+
+                    full_text = "\n".join(lines[1:-1])  # Exclude Title and Date line
+
                     if "----" in full_text:
                         parts = full_text.split("----")
                         content_body = parts[0].strip()
@@ -342,7 +356,7 @@ def load_essays():
                         comments_block = ""
 
                     word_count, read_time = estimate_reading_time(content_body)
-                    
+
                     # Parse Metadata
                     meta = parse_metadata(comments_block)
 
@@ -361,7 +375,7 @@ def load_essays():
                         "word_count": word_count,
                         "read_time": read_time,
                     }
-                    entry.update(meta) # Merge parsed metadata (grade, tag, etc)
+                    entry.update(meta)  # Merge parsed metadata (grade, tag, etc)
                     data.append(entry)
             except Exception as e:
                 print(f"Error reading {filename}: {e}")
@@ -370,23 +384,24 @@ def load_essays():
     data.sort(key=lambda x: x["date_obj"], reverse=True)
     return data
 
+
 class EssayHandler(http.server.SimpleHTTPRequestHandler):
     def check_auth(self):
         """Validates the HTTP Basic Authentication header."""
-        auth_header = self.headers.get('Authorization')
+        auth_header = self.headers.get("Authorization")
         if not auth_header:
             return False
-        
+
         try:
             # Header is typically "Basic <base64_string>"
-            auth_type, encoded = auth_header.split(' ', 1)
-            if auth_type.lower() != 'basic':
+            auth_type, encoded = auth_header.split(" ", 1)
+            if auth_type.lower() != "basic":
                 return False
-            
+
             # Decode the base64 string
-            decoded = base64.b64decode(encoded).decode('utf-8')
-            username, password = decoded.split(':', 1)
-            
+            decoded = base64.b64decode(encoded).decode("utf-8")
+            username, password = decoded.split(":", 1)
+
             # Verify credentials
             return username == AUTH_USERNAME and password == AUTH_PASSWORD
         except Exception:
@@ -395,14 +410,14 @@ class EssayHandler(http.server.SimpleHTTPRequestHandler):
     def do_auth_request(self):
         """Sends the 401 response to trigger the browser login popup."""
         self.send_response(401)
-        self.send_header('WWW-Authenticate', 'Basic realm="EssayServer"')
-        self.send_header('Content-type', 'text/html')
+        self.send_header("WWW-Authenticate", 'Basic realm="EssayServer"')
+        self.send_header("Content-type", "text/html")
         self.end_headers()
         self.wfile.write(b"401 Unauthorized: Access Denied")
 
     def do_POST(self):
         """Handle saving essay updates with structured metadata."""
-        
+
         # 1. Authentication Check
         if not self.check_auth():
             self.do_auth_request()
@@ -410,12 +425,14 @@ class EssayHandler(http.server.SimpleHTTPRequestHandler):
 
         # 2. Security: Check Content-Length to prevent DoS (Memory Exhaustion)
         try:
-            content_length = int(self.headers.get('Content-Length', 0))
+            content_length = int(self.headers.get("Content-Length", 0))
         except (ValueError, TypeError):
             content_length = 0
-            
+
         if content_length > MAX_UPLOAD_SIZE:
-            self.send_error(413, f"Payload Too Large. Limit is {MAX_UPLOAD_SIZE/(1024*1024)}MB.")
+            self.send_error(
+                413, f"Payload Too Large. Limit is {MAX_UPLOAD_SIZE / (1024 * 1024)}MB."
+            )
             return
 
         parsed_path = urllib.parse.urlparse(self.path)
@@ -423,7 +440,7 @@ class EssayHandler(http.server.SimpleHTTPRequestHandler):
         # --- Route: Upload Zip Restore ---
         if parsed_path.path == "/upload_zip":
             # CSRF Check for AJAX Upload
-            if self.headers.get('X-CSRF-Token') != CSRF_TOKEN:
+            if self.headers.get("X-CSRF-Token") != CSRF_TOKEN:
                 self.send_error(403, "CSRF Check Failed: Token missing or invalid")
                 return
 
@@ -434,23 +451,24 @@ class EssayHandler(http.server.SimpleHTTPRequestHandler):
                 with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
                     tmp_upload_path = tmp_file.name
                     bytes_remaining = content_length
-                    chunk_size = 64 * 1024 # 64KB chunks
-                    
+                    chunk_size = 64 * 1024  # 64KB chunks
+
                     while bytes_remaining > 0:
                         chunk = self.rfile.read(min(chunk_size, bytes_remaining))
-                        if not chunk: break
+                        if not chunk:
+                            break
                         tmp_file.write(chunk)
                         bytes_remaining -= len(chunk)
 
                 # Check magic number
-                with open(tmp_upload_path, 'rb') as f:
-                    if f.read(2) != b'PK':
+                with open(tmp_upload_path, "rb") as f:
+                    if f.read(2) != b"PK":
                         self.send_error(400, "Not a valid zip file")
                         return
 
                 if not zipfile.is_zipfile(tmp_upload_path):
-                     self.send_error(400, "Not a valid zip file")
-                     return
+                    self.send_error(400, "Not a valid zip file")
+                    return
 
                 # Create essay dir if missing
                 if not os.path.exists(ESSAY_DIR):
@@ -458,29 +476,30 @@ class EssayHandler(http.server.SimpleHTTPRequestHandler):
 
                 count_added = 0
                 count_renamed = 0
-                
+
                 # Process the zip file from disk
-                with zipfile.ZipFile(tmp_upload_path, 'r') as zip_ref:
+                with zipfile.ZipFile(tmp_upload_path, "r") as zip_ref:
                     for member in zip_ref.namelist():
                         # Basic security: skip directories and files with traversal
-                        if member.endswith('/') or '..' in member:
+                        if member.endswith("/") or ".." in member:
                             continue
-                        
+
                         # Only accept .txt
-                        if not member.lower().endswith('.txt'):
+                        if not member.lower().endswith(".txt"):
                             continue
-                            
+
                         # Use basename to flatten structure and prevent traversal
                         filename = os.path.basename(member)
-                        if not filename: continue
-                        
+                        if not filename:
+                            continue
+
                         target_path = os.path.join(ESSAY_DIR, filename)
-                        
+
                         # GRACEFUL CONFLICT HANDLING
                         if os.path.exists(target_path):
-                            existing_content = open(target_path, 'rb').read()
+                            existing_content = open(target_path, "rb").read()
                             new_content = zip_ref.read(member)
-                            
+
                             if existing_content != new_content:
                                 timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
                                 name, ext = os.path.splitext(filename)
@@ -489,29 +508,35 @@ class EssayHandler(http.server.SimpleHTTPRequestHandler):
                                 count_renamed += 1
                             else:
                                 continue
-                        
-                        with open(target_path, 'wb') as f:
+
+                        with open(target_path, "wb") as f:
                             f.write(zip_ref.read(member))
                         count_added += 1
 
                 self.send_response(200)
-                self.send_header('Content-type', 'text/plain')
+                self.send_header("Content-type", "text/plain")
                 self.end_headers()
-                self.wfile.write(f"Restore complete. Added: {count_added}, Renamed (Conflicts): {count_renamed}".encode('utf-8'))
-                
+                self.wfile.write(
+                    f"Restore complete. Added: {count_added}, Renamed (Conflicts): {count_renamed}".encode(
+                        "utf-8"
+                    )
+                )
+
             except Exception as e:
                 print(f"Zip Upload Error: {e}")
                 self.send_error(500, f"Error processing zip: {str(e)}")
             finally:
                 # Cleanup temp file
                 if tmp_upload_path and os.path.exists(tmp_upload_path):
-                    try: os.remove(tmp_upload_path)
-                    except: pass
+                    try:
+                        os.remove(tmp_upload_path)
+                    except Exception:
+                        pass
             return
 
         # --- Route: Save/Delete Essay (Standard POST) ---
         try:
-            post_data = self.rfile.read(content_length).decode('utf-8')
+            post_data = self.rfile.read(content_length).decode("utf-8")
             params = urllib.parse.parse_qs(post_data)
 
             # CSRF Check for Form Submissions
@@ -519,15 +544,15 @@ class EssayHandler(http.server.SimpleHTTPRequestHandler):
             if submitted_token != CSRF_TOKEN:
                 self.send_error(403, "CSRF Check Failed: Token missing or invalid")
                 return
-            
+
             # --- Handle Delete ---
             if params.get("action", [""])[0] == "delete":
                 filename = params.get("filename", [""])[0]
-                
+
                 # SECURITY FIX: Prevent Path Traversal
                 # We strictly extract the basename, ignoring any path components provided
                 filename = os.path.basename(filename)
-                
+
                 if filename:
                     filepath = os.path.join(ESSAY_DIR, filename)
                     if os.path.exists(filepath):
@@ -537,16 +562,16 @@ class EssayHandler(http.server.SimpleHTTPRequestHandler):
                             self.send_error(500, f"Error deleting file: {e}")
                             return
                 self.send_response(303)
-                self.send_header('Location', '/')
+                self.send_header("Location", "/")
                 self.end_headers()
                 return
-            
+
             # Extract Core fields
             filename = params.get("filename", [""])[0]
             title = params.get("title", [""])[0]
             content = params.get("content", [""])[0]
             date_str = params.get("date", [""])[0]
-            
+
             # Extract Metadata Fields
             meta_grade = params.get("meta_grade", [""])[0]
             meta_tag = params.get("meta_tag", [""])[0]
@@ -574,32 +599,37 @@ class EssayHandler(http.server.SimpleHTTPRequestHandler):
             content = content.replace("\r\n", "\n")
             meta_note = meta_note.replace("\r\n", "\n")
             meta_reflection = meta_reflection.replace("\r\n", "\n")
-            
+
             # Reconstruct the Metadata Block
-            comments_parts = []
-            if meta_grade: comments_parts.append(f"Grade: {meta_grade}/10")
-            if meta_tag: comments_parts.append(f"Class: {meta_tag}")
-            if meta_grader: comments_parts.append(f"Grader: {meta_grader}")
-            
-            if meta_note: 
+            comments_parts: list[str] = []
+            if meta_grade:
+                comments_parts.append(f"Grade: {meta_grade}/10")
+            if meta_tag:
+                comments_parts.append(f"Class: {meta_tag}")
+            if meta_grader:
+                comments_parts.append(f"Grader: {meta_grader}")
+
+            if meta_note:
                 comments_parts.append(f"Grader's Note:\n{meta_note}")
-            
-            if meta_reflection: 
+
+            if meta_reflection:
                 comments_parts.append(f"Self-Reflection:\n{meta_reflection}")
-                
+
             new_comments_block = "\n\n".join(comments_parts)
 
             # Reconstruct file content matching the format
-            file_content = f"{title}\n\n{content}\n\n----\n\n{new_comments_block}\n\n{date_str}"
-            
+            file_content = (
+                f"{title}\n\n{content}\n\n----\n\n{new_comments_block}\n\n{date_str}"
+            )
+
             filepath = os.path.join(ESSAY_DIR, filename)
-            with open(filepath, 'w', encoding='utf-8') as f:
+            with open(filepath, "w", encoding="utf-8") as f:
                 f.write(file_content)
-                
+
             self.send_response(303)
-            self.send_header('Location', f'/?file={filename}')
+            self.send_header("Location", f"/?file={filename}")
             self.end_headers()
-            
+
         except Exception as e:
             print(f"POST Error: {e}")
             self.send_error(500, f"Error saving file: {str(e)}")
@@ -610,51 +640,64 @@ class EssayHandler(http.server.SimpleHTTPRequestHandler):
         # --- Route: Logout ---
         if parsed_path.path == "/logout":
             self.send_response(401)
-            self.send_header('WWW-Authenticate', 'Basic realm="EssayServer"')
-            self.send_header('Content-type', 'text/html')
+            self.send_header("WWW-Authenticate", 'Basic realm="EssayServer"')
+            self.send_header("Content-type", "text/html")
             self.end_headers()
-            self.wfile.write(b"<!DOCTYPE html><html><body style='font-family: sans-serif; background: #121212; color: #e0e0e0; padding: 40px;'><h1>Logged out</h1><p>You have been logged out. <a href='/' style='color: #66b3ff;'>Log in again</a></p></body></html>")
+            self.wfile.write(
+                b"<!DOCTYPE html><html><body style='font-family: sans-serif; background: #121212; color: #e0e0e0; padding: 40px;'><h1>Logged out</h1><p>You have been logged out. <a href='/' style='color: #66b3ff;'>Log in again</a></p></body></html>"
+            )
             return
 
         # 1. Authentication Check
         if not self.check_auth():
             self.do_auth_request()
             return
-        
+
         # --- Route: Download Backup Zip ---
         if parsed_path.path == "/download_zip":
             # Use temp file to avoid RAM spike from backup generation
             tmp_zip_path = None
             try:
                 # Create zip in temp file on disk
-                with tempfile.NamedTemporaryFile(suffix='.zip', delete=False) as tmp_file:
+                with tempfile.NamedTemporaryFile(
+                    suffix=".zip", delete=False
+                ) as tmp_file:
                     tmp_zip_path = tmp_file.name
-                    with zipfile.ZipFile(tmp_file, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                    with zipfile.ZipFile(
+                        tmp_file, "w", zipfile.ZIP_DEFLATED
+                    ) as zip_file:
                         if os.path.exists(ESSAY_DIR):
-                            for root, dirs, files in os.walk(ESSAY_DIR):
+                            for root, _, files in os.walk(ESSAY_DIR):
                                 for file in files:
                                     if file.endswith(".txt"):
                                         file_path = os.path.join(root, file)
-                                        zip_file.write(file_path, os.path.basename(file_path))
-                
+                                        zip_file.write(
+                                            file_path, os.path.basename(file_path)
+                                        )
+
                 # Stream it out
-                with open(tmp_zip_path, 'rb') as f:
+                with open(tmp_zip_path, "rb") as f:
                     fs = os.fstat(f.fileno())
                     self.send_response(200)
                     self.send_header("Content-Type", "application/zip")
-                    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
-                    self.send_header("Content-Disposition", f'attachment; filename="essays-{timestamp}.zip"')
+                    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                    self.send_header(
+                        "Content-Disposition",
+                        f'attachment; filename="essays-{timestamp}.zip"',
+                    )
                     self.send_header("Content-Length", str(fs.st_size))
                     self.end_headers()
                     shutil.copyfileobj(f, self.wfile)
-                    
+
             except Exception as e:
                 print(f"Backup Error: {e}")
                 self.send_error(500, f"Error creating backup: {str(e)}")
             finally:
                 if tmp_zip_path and os.path.exists(tmp_zip_path):
-                    try: os.remove(tmp_zip_path)
-                    except: pass
+                    try:
+                        os.remove(tmp_zip_path)
+                    except Exception:
+                        pass
             return
 
         # --- Route: Index / List / Search ---
@@ -671,7 +714,7 @@ class EssayHandler(http.server.SimpleHTTPRequestHandler):
                 ddc_options = ""
                 for c in DDC_CLASSES:
                     ddc_options += f'<option value="{c}">{c}</option>'
-                
+
                 html = f"""
                 <!DOCTYPE html>
                 <html>
@@ -723,7 +766,7 @@ class EssayHandler(http.server.SimpleHTTPRequestHandler):
 
                         <div>
                             <label>Date</label>
-                            <input type="date" name="date" value="{datetime.now().strftime('%Y-%m-%d')}" required>
+                            <input type="date" name="date" value="{datetime.now().strftime("%Y-%m-%d")}" required>
                         </div>
                         <div class="edit-actions">
                             <button type="submit" class="btn btn-primary">Save Essay</button>
@@ -737,38 +780,46 @@ class EssayHandler(http.server.SimpleHTTPRequestHandler):
                 return
 
             # 2. Edit View
-            if "action" in query_params and query_params["action"][0] == "edit" and "file" in query_params:
+            if (
+                "action" in query_params
+                and query_params["action"][0] == "edit"
+                and "file" in query_params
+            ):
                 filename = query_params["file"][0]
                 # Find essay
                 row = next((e for e in essays if e["filename"] == filename), None)
-                
+
                 if row:
                     # Helper for safe value extraction
-                    grade_val = row['grade'] if row['grade'] is not None else ""
-                    tag_val = row['tag'] if row['tag'] else ""
-                    grader_val = row['grader'] if row['grader'] and row['grader'] != "Unknown" else ""
-                    
+                    grade_val = row["grade"] if row["grade"] is not None else ""
+                    tag_val = row["tag"] if row["tag"] else ""
+                    grader_val = (
+                        row["grader"]
+                        if row["grader"] and row["grader"] != "Unknown"
+                        else ""
+                    )
+
                     # Generate options for dropdown with selection logic
                     ddc_options = ""
                     for c in DDC_CLASSES:
                         sel = "selected" if tag_val == c else ""
                         ddc_options += f'<option value="{c}" {sel}>{c}</option>'
-                    
+
                     html = f"""
                     <html>
-                    <head><title>Edit: {row['title']}</title>{CSS}</head>
+                    <head><title>Edit: {row["title"]}</title>{CSS}</head>
                     <body>
                         <h1>Edit Essay</h1>
                         <form method="POST" action="/" class="edit-form">
                             <input type="hidden" name="csrf_token" value="{CSRF_TOKEN}">
-                            <input type="hidden" name="filename" value="{row['filename']}">
+                            <input type="hidden" name="filename" value="{row["filename"]}">
                             <div>
                                 <label>Title</label>
-                                <input type="text" name="title" value="{row['title']}" required>
+                                <input type="text" name="title" value="{row["title"]}" required>
                             </div>
                             <div>
                                 <label>Content (Markdown supported)</label>
-                                <textarea name="content">{row['content_raw']}</textarea>
+                                <textarea name="content">{row["content_raw"]}</textarea>
                             </div>
                             
                             <div style="background: #1a1a1a; padding: 15px; border-radius: 6px; border: 1px solid #333;">
@@ -794,29 +845,29 @@ class EssayHandler(http.server.SimpleHTTPRequestHandler):
                                 
                                 <div style="margin-bottom: 15px;">
                                     <label style="font-size:0.85em; color:#888;">Grader's Note</label>
-                                    <textarea name="meta_note" style="min-height: 100px; font-family: inherit; font-size: 0.9em;">{row['grader_note']}</textarea>
+                                    <textarea name="meta_note" style="min-height: 100px; font-family: inherit; font-size: 0.9em;">{row["grader_note"]}</textarea>
                                 </div>
                                 
                                 <div>
                                     <label style="font-size:0.85em; color:#888;">Self-Reflection</label>
-                                    <textarea name="meta_reflection" style="min-height: 100px; font-family: inherit; font-size: 0.9em;">{row['reflection']}</textarea>
+                                    <textarea name="meta_reflection" style="min-height: 100px; font-family: inherit; font-size: 0.9em;">{row["reflection"]}</textarea>
                                 </div>
                             </div>
 
                             <div>
                                 <label>Date</label>
-                                <input type="date" name="date" value="{row['date_str']}" required>
+                                <input type="date" name="date" value="{row["date_str"]}" required>
                             </div>
                             <div class="edit-actions">
                                 <button type="submit" class="btn btn-primary">Save Changes</button>
-                                <a href="/?file={row['filename']}" class="btn">Cancel</a>
+                                <a href="/?file={row["filename"]}" class="btn">Cancel</a>
                                 <button type="button" class="btn btn-danger" style="margin-left:auto;" onclick="if(confirm('Are you sure you want to delete this essay?')) document.getElementById('delete-form').submit();">Delete</button>
                             </div>
                         </form>
                         <form id="delete-form" method="POST" action="/">
                             <input type="hidden" name="csrf_token" value="{CSRF_TOKEN}">
                             <input type="hidden" name="action" value="delete">
-                            <input type="hidden" name="filename" value="{row['filename']}">
+                            <input type="hidden" name="filename" value="{row["filename"]}">
                         </form>
                     </body>
                     </html>
@@ -834,70 +885,75 @@ class EssayHandler(http.server.SimpleHTTPRequestHandler):
 
                 if row:
                     # Render Markdown Content
-                    formatted_content = render_markdown(row['content_raw'])
-                    
+                    formatted_content = render_markdown(row["content_raw"])
+
                     # Grade Badge
                     grade_display = ""
-                    if row['grade'] is not None:
-                        val = row['grade']
-                        if val >= 9: grade_class = "high"
-                        elif val >= 7: grade_class = "medium"
-                        else: grade_class = "low"
+                    if row["grade"] is not None:
+                        val = row["grade"]
+                        if val >= 9:
+                            grade_class = "high"
+                        elif val >= 7:
+                            grade_class = "medium"
+                        else:
+                            grade_class = "low"
                         grade_display = f'<span class="badge badge-grade {grade_class}">Grade: {val}/10</span>'
 
                     # Tag Badge
                     tag_display = ""
-                    if row['tag']:
-                        tag_display = f'<span class="badge badge-tag">{row["tag"]}</span>'
+                    if row["tag"]:
+                        tag_display = (
+                            f'<span class="badge badge-tag">{row["tag"]}</span>'
+                        )
 
                     # Build Review Section
                     review_html = ""
-                    has_review = row.get('grader_note') or row.get('reflection')
-                    
+                    has_review = row.get("grader_note") or row.get("reflection")
+
                     if has_review:
                         review_html += '<div class="review-section">'
-                        
+
                         # Grader Card
-                        if row.get('grader_note'):
-                            note_html = row.get('grader_note_html', row['grader_note'])
-                            grader_name = row.get('grader', 'Unknown Grader')
+                        if row.get("grader_note"):
+                            note_html = row.get("grader_note_html", row["grader_note"])
+                            grader_name = row.get("grader", "Unknown Grader")
                             review_html += f"""
                             <div class="card grader-card">
                                 <div class="grader-meta">CRITIQUE BY {grader_name}</div>
                                 <div class="content-box" style="margin-bottom:0; font-size:0.95em;">{note_html}</div>
                             </div>
                             """
-                            
+
                         # Reflection Card
-                        if row.get('reflection'):
-                            ref_html = row.get('reflection_html', row['reflection'])
+                        if row.get("reflection"):
+                            ref_html = row.get("reflection_html", row["reflection"])
                             review_html += f"""
                             <div class="card reflection-card">
                                 <div class="reflection-meta">AUTHOR'S REFLECTION</div>
                                 <div class="content-box" style="margin-bottom:0; font-size:0.95em;">{ref_html}</div>
                             </div>
                             """
-                        review_html += '</div>'
+                        review_html += "</div>"
 
                     # If no structured data but raw comments exist, fallback
-                    elif row['comments_raw']:
-                         review_html = f'<div class="card grader-card"><pre>{row["comments_raw"]}</pre></div>'
+                    elif row["comments_raw"]:
+                        review_html = f'<div class="card grader-card"><pre>{row["comments_raw"]}</pre></div>'
 
                     html = f"""
                     <html>
-                    <head><title>{row['title']}</title>{CSS}</head>
+                    <head><title>{row["title"]}</title>{CSS}</head>
                     <body>
                         <div class="header-controls">
                             <div><a href="/" class="back-link">&larr; Back to Index</a></div>
-                            <div><a href="/?action=edit&file={row['filename']}" class="btn">Edit</a></div>
+                            <div><a href="/?action=edit&file={row["filename"]}" class="btn">Edit</a></div>
                         </div>
                         
-                        <h1>{row['title']}</h1>
+                        <h1>{row["title"]}</h1>
                         <div class="badges">
                             {tag_display}
-                            <span class="badge">{row['word_count']} words</span>
-                            <span class="badge">{row['read_time']} min read</span>
-                            <span class="badge">{row['date_str']}</span>
+                            <span class="badge">{row["word_count"]} words</span>
+                            <span class="badge">{row["read_time"]} min read</span>
+                            <span class="badge">{row["date_str"]}</span>
                             {grade_display}
                         </div>
                         <hr style="border-color: #333; margin: 20px 0;">
@@ -918,29 +974,32 @@ class EssayHandler(http.server.SimpleHTTPRequestHandler):
             # 4. Index List Logic
             search_query = query_params.get("q", [""])[0]
             filter_class = query_params.get("class", [""])[0]
-            
+
             if search_query and essays:
                 try:
                     pattern = re.compile(search_query, re.IGNORECASE)
                     essays = [
-                        e for e in essays 
-                        if pattern.search(e['title']) 
-                        or pattern.search(e['content_raw']) 
-                        or pattern.search(e['comments_raw'])
+                        e
+                        for e in essays
+                        if pattern.search(e["title"])
+                        or pattern.search(e["content_raw"])
+                        or pattern.search(e["comments_raw"])
                     ]
                 except re.error:
                     essays = []
-            
+
             if filter_class and essays:
-                essays = [e for e in essays if e.get('tag') == filter_class]
+                essays = [e for e in essays if e.get("tag") == filter_class]
 
             sort_mode = query_params.get("sort", ["date"])[0]
             if essays:
                 if sort_mode == "grade":
                     # Handle None in grade for sorting
-                    essays.sort(key=lambda x: (x['grade'] is not None, x['grade']), reverse=True)
+                    essays.sort(
+                        key=lambda x: (x["grade"] is not None, x["grade"]), reverse=True
+                    )
                 else:
-                    essays.sort(key=lambda x: x['date_obj'], reverse=True)
+                    essays.sort(key=lambda x: x["date_obj"], reverse=True)
 
             # Pagination Logic
             page_param = query_params.get("page", ["1"])[0]
@@ -948,105 +1007,130 @@ class EssayHandler(http.server.SimpleHTTPRequestHandler):
                 current_page = int(page_param)
             except ValueError:
                 current_page = 1
-            
+
             total_count = len(essays)
             total_pages = math.ceil(total_count / ITEMS_PER_PAGE)
-            if total_pages == 0: total_pages = 1
-            
-            if current_page > total_pages: current_page = total_pages
-            if current_page < 1: current_page = 1
-            
+            if total_pages == 0:
+                total_pages = 1
+
+            if current_page > total_pages:
+                current_page = total_pages
+            if current_page < 1:
+                current_page = 1
+
             start_idx = (current_page - 1) * ITEMS_PER_PAGE
             end_idx = start_idx + ITEMS_PER_PAGE
-            
+
             page_essays = essays[start_idx:end_idx]
 
             list_items = ""
             if page_essays:
                 for row in page_essays:
                     link = f"/?file={row['filename']}"
-                    
+
                     # Grade Badge
                     grade_html = ""
-                    if row['grade'] is not None:
-                        val = row['grade']
-                        if val >= 9: g_class = "high"
-                        elif val >= 7: g_class = "medium"
-                        else: g_class = "low"
-                        grade_html = f'<span class="badge badge-grade {g_class}">{val}</span>'
+                    if row["grade"] is not None:
+                        val = row["grade"]
+                        if val >= 9:
+                            g_class = "high"
+                        elif val >= 7:
+                            g_class = "medium"
+                        else:
+                            g_class = "low"
+                        grade_html = (
+                            f'<span class="badge badge-grade {g_class}">{val}</span>'
+                        )
 
                     # Tag Badge
                     tag_html = ""
-                    if row['tag']:
+                    if row["tag"]:
                         tag_html = f'<span class="badge badge-tag" style="font-size:0.8em; margin-right:5px;">{row["tag"]}</span>'
 
                     list_items += f"""
                     <li class="essay-item">
                         <div class="essay-header">
-                            <a href="{link}" class="essay-title">{row['title']}</a>
+                            <a href="{link}" class="essay-title">{row["title"]}</a>
                             {grade_html}
                         </div>
                         <div class="badges">
                             {tag_html}
-                            <span class="badge">{row['date_str']}</span>
-                            <span class="badge">{row['read_time']} min read</span>
+                            <span class="badge">{row["date_str"]}</span>
+                            <span class="badge">{row["read_time"]} min read</span>
                         </div>
                     </li>
                     """
             else:
                 list_items = "<p style='color:#888'>No essays found.</p>"
 
-            def sort_cls(name):
+            def sort_cls(name: str):
                 return "sort-btn sort-active" if sort_mode == name else "sort-btn"
-                
+
             # Filter options for index dropdown
             filter_options = '<option value="">All Classes</option>'
             for c in DDC_CLASSES:
                 sel = "selected" if filter_class == c else ""
                 filter_options += f'<option value="{c}" {sel}>{c}</option>'
-            
+
             # Construct params for links to preserve filter/search state
             q_param = f"&q={urllib.parse.quote(search_query)}" if search_query else ""
-            c_param = f"&class={urllib.parse.quote(filter_class)}" if filter_class else ""
+            c_param = (
+                f"&class={urllib.parse.quote(filter_class)}" if filter_class else ""
+            )
             base_params = q_param + c_param
 
             # Pagination Controls HTML
             pagination_html = ""
             if total_pages > 1:
                 pagination_html = '<div class="pagination">'
-                
+
                 # Helper to make link
-                def make_page_link(p, text, active=False, disabled=False):
+                def make_page_link(
+                        p: int,
+                        text: str,
+                        active: bool = False,
+                        disabled: bool = False
+                ):
                     if disabled:
                         return f'<span class="page-link disabled">{text}</span>'
                     cls = "page-link active" if active else "page-link"
                     url = f"/?page={p}&sort={sort_mode}{base_params}"
                     return f'<a href="{url}" class="{cls}">{text}</a>'
-                
+
                 # Prev
-                pagination_html += make_page_link(current_page - 1, "&larr;", disabled=(current_page == 1))
-                
+                pagination_html += make_page_link(
+                    current_page - 1,
+                    "&larr;",
+                    disabled=(current_page == 1)
+                )
+
                 # Simple sliding window or just all if pages are few
                 start_p = max(1, current_page - 2)
                 end_p = min(total_pages, current_page + 2)
-                
+
                 # Always show first page
                 if start_p > 1:
                     pagination_html += make_page_link(1, "1")
-                    if start_p > 2: pagination_html += '<span class="page-link disabled">...</span>'
-                
+                    if start_p > 2:
+                        pagination_html += '<span class="page-link disabled">...</span>'
+
                 for p in range(start_p, end_p + 1):
-                    pagination_html += make_page_link(p, str(p), active=(p == current_page))
-                    
+                    pagination_html += make_page_link(
+                        p, str(p), active=(p == current_page)
+                    )
+
                 # Always show last page
                 if end_p < total_pages:
-                    if end_p < total_pages - 1: pagination_html += '<span class="page-link disabled">...</span>'
+                    if end_p < total_pages - 1:
+                        pagination_html += '<span class="page-link disabled">...</span>'
                     pagination_html += make_page_link(total_pages, str(total_pages))
 
                 # Next
-                pagination_html += make_page_link(current_page + 1, "&rarr;", disabled=(current_page == total_pages))
-                
-                pagination_html += '</div>'
+                pagination_html += make_page_link(
+                    current_page + 1, "&rarr;", disabled=(current_page == total_pages)
+                )
+
+                pagination_html += "</div>"
 
             # Meta Text
             start_display = start_idx + 1 if total_count > 0 else 0
@@ -1064,7 +1148,7 @@ class EssayHandler(http.server.SimpleHTTPRequestHandler):
                 <div class="site-header">
                     <img src="/logo.png" class="site-logo" alt="Logo" onerror="this.style.display='none'">
                     <h1>Essayism</h1>
-                    <a href="/logout" class="btn" style="margin-left: auto; background-color: #333; border: 1px solid #444;">Logout</a>
+                    <a href="/logout" class="btn" style="margin-left: auto; background-color: #333; border: 1px solid #444; text-decoration: none;">Logout</a>
                 </div>
                 
                 <form action="/" method="get" class="search-bar">
@@ -1072,7 +1156,7 @@ class EssayHandler(http.server.SimpleHTTPRequestHandler):
                     <select name="class" class="search-input" style="flex-grow: 0; width: auto; min-width: 150px;">
                         {filter_options}
                     </select>
-                    {f'<input type="hidden" name="sort" value="{sort_mode}">' if sort_mode else ''}
+                    {f'<input type="hidden" name="sort" value="{sort_mode}">' if sort_mode else ""}
                     <button type="submit" class="search-btn">Search</button>
                 </form>
 
@@ -1081,11 +1165,11 @@ class EssayHandler(http.server.SimpleHTTPRequestHandler):
                     <div style="display:flex; gap:5px; align-items:center;">
                         <input type="file" id="restoreInput" style="display: none;" accept=".zip" onchange="uploadBackup(this)">
                         <a href="/?action=create" class="btn btn-primary" style="margin-right:5px;text-decoration:none;">New Essay</a>
-                        <a href="/download_zip" class="btn" style="margin-right:5px;text-decoration:none;">Backup (Zip)</a>
-                        <button class="btn" style="margin-right:15px;" onclick="document.getElementById('restoreInput').click()">Restore (Zip)</button>
+                        <a href="/download_zip" class="btn" style="margin-right:5px;text-decoration:none;">Backup</a>
+                        <a href="#" class="btn" style="margin-right:15px;text-decoration:none;" onclick="document.getElementById('restoreInput').click()">Restore</a>
                         
-                        <a href="/?sort=date{base_params}" class="{sort_cls('date')}">Newest</a>
-                        <a href="/?sort=grade{base_params}" class="{sort_cls('grade')}">Highest Grade</a>
+                        <a href="/?sort=date{base_params}" class="{sort_cls("date")}" style="text-decoration:none;">Newest</a>
+                        <a href="/?sort=grade{base_params}" class="{sort_cls("grade")}" style="text-decoration:none;">Highest Grade</a>
                     </div>
                 </div>
 
@@ -1137,10 +1221,11 @@ class EssayHandler(http.server.SimpleHTTPRequestHandler):
             # Handle static files or other paths via default handler
             super().do_GET()
 
+
 if __name__ == "__main__":
     if not os.path.exists(ESSAY_DIR):
         os.makedirs(ESSAY_DIR)
-        
+
     with socketserver.TCPServer(("", PORT), EssayHandler) as httpd:
         print(f"Serving at http://localhost:{PORT}")
         print("Press Ctrl+C to stop.")
