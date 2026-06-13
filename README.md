@@ -1,5 +1,7 @@
 # Essayism
 
+![Screenshot of Essayism](./essayism-screenshot.png)
+
 A lightweight, zero-dependency essay management system built with Python. Designed for writing, archiving, and tracking essay performance with structured metadata (grades, critiques, and reflections).
 
 ## Features
